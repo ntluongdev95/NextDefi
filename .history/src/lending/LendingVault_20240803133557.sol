@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.24;
+
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {ILendingVault} from "../interfaces/ILendingVault.sol";
+import {Errors} from "../utils/Errors.sol";
+
+contract LendingVault is ERC20, ReentrancyGuard, Pausable, Ownable2Step, ILendingVault {
+    using SafeERC20 for IERC20;
+    /* ====================== CONSTANTS ======================== */
+
+    uint256 public constant SAFE_MULTIPLIER = 1e18;
+    uint256 public constant SECONDS_PER_YEAR = 365 days;
+
+
+    /* ==================== STATE VARIABLES ==================== */
+    // Vault's underlying asset
+    IERC20 public asset;
+    // Is asset native ETH
+    bool public isNativeAsset;
+    // Protocol treasury address
+    address public treasury;
+    // Amount borrowed from this vault
+    uint256 public totalBorrows;
+    // Total borrow shares in this vault
+    uint256 public totalBorrowDebt;
+    // The fee % applied to interest earned that goes to the protocol in 1e18
+    uint256 public performanceFee;
+    // Protocol earnings reserved in this vault
+    uint256 public vaultReserves;
+    // Last updated timestamp of this vault
+    uint256 public lastUpdatedAt;
+    // Max capacity of vault in asset decimals / amt
+    uint256 public maxCapacity;
+    // Interest rate model
+    InterestRate public interestRate;
+    // Max interest rate model limits
+    InterestRate public maxInterestRate;
+
+    /* ======================= MAPPINGS ======================== */
+
+    // Mapping of borrowers to borrowers struct
+    mapping(address => Borrower) public borrowers;
+    // Mapping of approved keepers
+    mapping(address => bool) public keepers;
+
+    /* ======================== EVENTS ========================= */
+
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        address asset_,
+        bool isNativeAsset_,
+        uint256 maxCapacity_,
+        InterestRate memory _interestRate,
+        InterestRate memory _maxInterestRate,
+        uint256 performanceFee_,
+        address treasury_
+    ) ERC20(name_, symbol_) Ownable(msg.sender) {
+        if (address(asset_) == address(0)) revert Errors.ZeroAddressNotAllowed();
+        if (treasury_ == address(0)) revert Errors.ZeroAddressNotAllowed();
+        if (IERC20(asset_).decimals() > 18) revert Errors.TokenDecimalsMustBeLessThan18();
+        asset = asset_;
+        isNativeAsset = isNativeAsset_;
+        maxCapacity = maxCapacity_;
+        performanceFee = performanceFee_;
+        treasury = treasury_;
+
+        interestRate.baseRate = _interestRate.baseRate;
+        interestRate.multiplier = _interestRate.multiplier;
+        interestRate.jumpMultiplier = _interestRate.jumpMultiplier;
+        interestRate.kink1 = _interestRate.kink1;
+        interestRate.kink2 = _interestRate.kink2;
+
+        maxInterestRate.baseRate = _maxInterestRate.baseRate;
+        maxInterestRate.multiplier = _maxInterestRate.multiplier;
+        maxInterestRate.jumpMultiplier = _maxInterestRate.jumpMultiplier;
+        maxInterestRate.kink1 = _maxInterestRate.kink1;
+        maxInterestRate.kink2 = _maxInterestRate.kink2;
+    }
+     /* ===================== VIEW FUNCTIONS ==================== */
+
+  function totalAsset() public view returns (uint256) {
+    return totalBorrows + _pendingInterest(0) + totalAvailableAsset();
+  }
+
+  function totalAvailableAsset() public view returns (uint256) {
+    return asset.balanceOf(address(this));
+  }
+
+    /* ================== MUTATIVE FUNCTIONS =================== */
+
+    function depositNative(uint256 assetAmt, uint256 minSharesAmt) external payable nonReentrant whenNotPaused{
+        if(msg.value == 0) revert Errors.EmptyDepositAmount();
+        if(msg.value != assetAmt) revert Errors.InvalidNativeDepositAmountValue();
+        if(totalAsset() + assetAmt > maxCapacity) revert Errors.InsufficientCapacity();
+
+    }
+
+     /* ================== INTERNAL FUNCTIONS =================== */
+     function _pendingInterest(uint256 assetAmt) internal view returns (uint256) {
+      if(totalBorrows == 0) return 0;
+      uint256 _totalAvailableAsset = totalAvailableAsset();
+      uint256 _passedTime = block.timestamp - lastUpdatedAt;
+ 
+     }
+
+     function _calculateInterestRate(uint256 _debt,uint256 _floating) internal view returns (uint256){
+       if(_debt ==0 && _floating == 0) return 0;
+       uint256 _total  = _debt +_floating;
+       uint256 _utilization = _total == 0 ? 0 : _debt * SAFE_MULTIPLIER / _total;
+       // If _utilization above kink2, return a higher interest rate
+    // (base + rate + excess _utilization above kink 2 * jumpMultiplier)
+       if (_utilization > interestRate.kink2) {
+       return interestRate.baseRate + (interestRate.kink1 * interestRate.multiplier / SAFE_MULTIPLIER)
+                      + ((_utilization - interestRate.kink2) * interestRate.jumpMultiplier / SAFE_MULTIPLIER);
+    }
+    // If _utilization between kink1 and kink2, rates are flat
+    if (interestRate.kink1 < _utilization && _utilization <= interestRate.kink2) {
+      return interestRate.baseRate + (interestRate.kink1 * interestRate.multiplier / SAFE_MULTIPLIER);
+    }
+
+    // If _utilization below kink1, calculate borrow rate for slope up to kink 1
+    return interestRate.baseRate + (_utilization * interestRate.multiplier / SAFE_MULTIPLIER);
+  }
+
+
+     }
+       
+}
